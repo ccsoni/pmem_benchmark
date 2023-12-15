@@ -16,6 +16,8 @@
 #define COPY_DRAM_TO_DRAM_LOOP (0)
 #define COPY_DRAM_TO_PMEM_MEMCPY (1)
 #define COPY_DRAM_TO_PMEM_LOOP (1)
+#define COPY_PMEM_TO_PMEM_MEMCPY (1)
+#define COPY_PMEM_TO_PMEM_LOOP (1)
 
 #define VERBOSE (0)
 
@@ -78,14 +80,16 @@ int main(int argc, char **argv)
   dram_REAL = (REAL *)aligned_alloc(ALIGN_BYTE, nsize*sizeof(REAL));
   for(int64_t i=0;i<nsize;i++) dram_REAL[i] = (float)i;
 
-  size_t nelem_fp32 = mapped_len/sizeof(float);
-  assert(nelem_fp32 >= nsize);
+  size_t nelem_fp = mapped_len/sizeof(REAL);
+  assert(nelem_fp >= nsize);
+
+  size_t nelem_fp_half = nelem_fp/2;
 
   static double bandwidth_i[NMEASURE];
   
 #if WRITE_IMM_TO_PMEM
   // writing immediate value into PMEM
-  printf("\n# Writing immediate values to PMEM with a for-loop.\n");
+  printf("# Writing immediate values to PMEM with a for-loop.\n");
   for(int32_t iloop=0;iloop<NMEASURE;iloop++) {
     double pmem_start_real_time = get_realtime();
 #pragma omp parallel for
@@ -98,7 +102,7 @@ int main(int argc, char **argv)
     bandwidth_i[iloop] = bandwidth;
 
 #if VERBOSE
-    printf("%f GiB FP32 data written in %10.2e sec with a bandwidth of %10.2e GiB/s.\n",
+    printf("%f GiB FP data written in %10.2e sec with a bandwidth of %10.2e GiB/s.\n",
 	   data_size_in_GiB, pmem_end_real_time - pmem_start_real_time, bandwidth);fflush(stdout);
 #endif    
   }
@@ -107,7 +111,7 @@ int main(int argc, char **argv)
 
 #if WRITE_IMM_TO_DRAM
   // writing immediate value into DRAM
-  printf("\n# Writing immediate values to DRAM with a for-loop.\n");
+  printf("# Writing immediate values to DRAM with a for-loop.\n");
   for(int32_t iloop=0;iloop<NMEASURE;iloop++) {
     double dram_start_real_time = get_realtime();
 #pragma omp parallel for
@@ -120,7 +124,7 @@ int main(int argc, char **argv)
     bandwidth_i[iloop] = bandwidth;
 
 #if VERBOSE    
-    printf("%f GiB FP32 data written in %10.2e sec with a bandwidth of %10.2e GiB/s.\n",
+    printf("%f GiB FP data written in %10.2e sec with a bandwidth of %10.2e GiB/s.\n",
 	   data_size_in_GiB, dram_stop_real_time-dram_start_real_time, bandwidth);fflush(stdout);
 #endif
   }
@@ -129,7 +133,7 @@ int main(int argc, char **argv)
 
 #if COPY_DRAM_TO_DRAM_MEMCPY
   // copying data from DRAM to DRAM with memcpy()
-  printf("\n# Copying data from DRAM to DRAM with memcpy()\n");
+  printf("# Copying data from DRAM to DRAM with memcpy()\n");
   for(int32_t iloop=0;iloop<NMEASURE;iloop++) {
     double D2D_copy_start_real_time = get_realtime();
 
@@ -144,7 +148,7 @@ int main(int argc, char **argv)
     bandwidth_i[iloop] = bandwidth;
 
 #if VERBOSE    
-    printf("%f GiB FP32 data written in %10.2e sec with a bandwidth of %10.2e GiB/s.\n",
+    printf("%f GiB FP data written in %10.2e sec with a bandwidth of %10.2e GiB/s.\n",
 	   data_size_in_GiB, D2D_copy_stop_real_time-D2D_copy_start_real_time, bandwidth);fflush(stdout);
 #endif
   }
@@ -153,7 +157,7 @@ int main(int argc, char **argv)
 
 #if COPY_DRAM_TO_DRAM_LOOP
   // copying data from DRAM to DRAM with a for-loop
-  printf("\n# Copying data from DRAM to DRAM with a for-loop\n");
+  printf("# Copying data from DRAM to DRAM with a for-loop\n");
   for(int32_t iloop=0;iloop<NMEASURE;iloop++) {
     double D2D_copy_start_real_time = get_realtime();
 #pragma omp parallel for
@@ -166,7 +170,7 @@ int main(int argc, char **argv)
     bandwidth_i[iloop] = bandwidth;
 
 #if VERBOSE
-    printf("%f GiB FP32 data written in %10.2e sec with a bandwidth of %10.2e GiB/s.\n",
+    printf("%f GiB FP data written in %10.2e sec with a bandwidth of %10.2e GiB/s.\n",
 	   data_size_in_GiB, D2D_copy_stop_real_time-D2D_copy_start_real_time, bandwidth);fflush(stdout);
 #endif
   }
@@ -175,7 +179,7 @@ int main(int argc, char **argv)
 
 #if COPY_DRAM_TO_PMEM_MEMCPY
   // copying data from DRAM to PMEM with pmem_memcpy() with pmem_memcpy() in the non-tempral model
-  printf("\n# Copying data from DRAM to PMEM with pmem_memcpy()\n");
+  printf("# Copying data from DRAM to PMEM with pmem_memcpy()\n");
   for(int32_t iloop=0;iloop<NMEASURE;iloop++) {  
     double D2P_start_real_time = get_realtime();
     omp_set_num_threads(nthread);
@@ -189,7 +193,7 @@ int main(int argc, char **argv)
     bandwidth_i[iloop] = bandwidth;
 
 #if VERBOSE
-    printf("%f GiB FP32 data written in %10.2e sec with a bandwidth of %10.2e GiB/s.\n",
+    printf("%f GiB FP data written in %10.2e sec with a bandwidth of %10.2e GiB/s.\n",
 	   data_size_in_GiB, D2P_stop_real_time-D2P_start_real_time, bandwidth);fflush(stdout);
 #endif    
   }
@@ -198,8 +202,8 @@ int main(int argc, char **argv)
 
 
 #if COPY_DRAM_TO_PMEM_LOOP
-  // copying data from DRAM to PMEM with pmem_memcpy() with a for-loop
-  printf("\n# Copying data from DRAM to PMEM with a for-loop\n");
+  // copying data from DRAM to PMEM with a for-loop
+  printf("# Copying data from DRAM to PMEM with a for-loop\n");
   for(int32_t iloop=0;iloop<NMEASURE;iloop++) {  
     double D2P_start_real_time = get_realtime();
 #pragma omp parallel for
@@ -212,12 +216,57 @@ int main(int argc, char **argv)
     bandwidth_i[iloop] = bandwidth;
 
 #if VERBOSE    
-    printf("%f GiB FP32 data written in %10.2e sec with a bandwidth of %10.2e GiB/s.\n",
+    printf("%f GiB FP data written in %10.2e sec with a bandwidth of %10.2e GiB/s.\n",
 	   data_size_in_GiB, D2P_stop_real_time-D2P_start_real_time, bandwidth);fflush(stdout);
 #endif    
   }
   printf("%12.4e %12.4e\n", data_size_in_GiB, get_average(bandwidth_i, NMEASURE));
-#endif  
+#endif
+
+#if COPY_PMEM_TO_PMEM_MEMCPY
+  // copying data from PMEM to PMEM with pmem_memcpy() in the non-tempral model
+  printf("# Copying data from PMEM to PMEM with pmem_memcpy()\n");
+  for(int32_t iloop=0;iloop<NMEASURE;iloop++) {  
+    double P2P_start_real_time = get_realtime();
+    omp_set_num_threads(nthread);
+#pragma omp parallel for
+    for(int32_t i=0;i<nthread;i++) {
+      pmem_memcpy(pmesh+i*stride, pmesh+i*stride+nelem_fp_half, sizeof(REAL)*stride, PMEM_F_MEM_NONTEMPORAL);
+    }
+    double P2P_stop_real_time = get_realtime();
+
+    bandwidth = data_size_in_GiB / (P2P_stop_real_time - P2P_start_real_time);
+    bandwidth_i[iloop] = bandwidth;
+
+#if VERBOSE
+    printf("%f GiB FP data written in %10.2e sec with a bandwidth of %10.2e GiB/s.\n",
+	   data_size_in_GiB, P2P_stop_real_time-P2P_start_real_time, bandwidth);fflush(stdout);
+#endif    
+  }
+  printf("%12.4e %12.4e\n", data_size_in_GiB, get_average(bandwidth_i, NMEASURE));    
+#endif
+
+#if COPY_PMEM_TO_PMEM_LOOP
+  // copying data from PMEM to PMEM with a for-loop
+  printf("# Copying data from PMEM to PMEM with a for-loop\n");
+  for(int32_t iloop=0;iloop<NMEASURE;iloop++) {  
+    double P2P_start_real_time = get_realtime();
+#pragma omp parallel for
+    for(int32_t i=0;i<nsize;i++) {
+      pmesh[i] = pmesh[i+nelem_fp_half];
+    }
+    double P2P_stop_real_time = get_realtime();
+
+    bandwidth = data_size_in_GiB / (P2P_stop_real_time - P2P_start_real_time);
+    bandwidth_i[iloop] = bandwidth;
+
+#if VERBOSE    
+    printf("%f GiB FP data written in %10.2e sec with a bandwidth of %10.2e GiB/s.\n",
+	   data_size_in_GiB, P2P_stop_real_time-P2P_start_real_time, bandwidth);fflush(stdout);
+#endif    
+  }
+  printf("%12.4e %12.4e\n", data_size_in_GiB, get_average(bandwidth_i, NMEASURE));  
+#endif
 
   free(dram_REAL);
   free(dmesh);
