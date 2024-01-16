@@ -11,7 +11,7 @@ nshift=len(shift)
 nthread_pattern=len(nthread)
 
 def read_data(ishift, ithread, bw_D2D, bw_D2P_1, bw_D2P_2, bw_P2P_1, bw_P2P_2, data_size):
-    filename = 'pmem_io_single_'+str(shift[ishift])+'_'+str(nthread[ithread])+'.dat'
+    filename = 'pmem_io_serial_'+str(shift[ishift])+'_'+str(nthread[ithread])+'.dat'
 
     print(filename)
     file =  open(filename,'r')
