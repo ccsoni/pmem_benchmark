@@ -164,11 +164,12 @@ int main(int argc, char **argv)
   if(myrank == 0) bandwidth[3] = get_average(bandwidth_i, NMEASURE);  
 #endif
 
-    if(myrank == 0) {
-    printf("#data_size [GiB] D2D_BW D2P_BW P2P_BW P2D_BW\n");
-    printf("%12.4e %12.4e %12.4e %12.4e %12.4e\n", data_size_in_GiB,
-	   bandwidth[0], bandwidth[1], bandwidth[2], bandwidth[3]);
-    fflush(stdout);
+  if(myrank == 0) {
+    FILE *fp = fopen("allgather_pmem.dat","a");
+    //    fprintf(fp, "# data_size [GiB] D2D_BW D2P_BW P2P_BW P2D_BW\n");
+    fprintf(fp,"%12.4e %12.4e %12.4e %12.4e %12.4e\n", data_size_in_GiB,
+	    bandwidth[0], bandwidth[1], bandwidth[2], bandwidth[3]);
+    fclose(fp);
   }
 
   free(dmesh);

@@ -120,9 +120,10 @@ int main(int argc, char **argv)
 #endif
 
   if(myrank == 0) {
-    printf("#data_size [GiB] D2D_BW P2P_BW\n");
-    printf("%12.4e %12.4e %12.4e\n", data_size_in_GiB, bandwidth[0], bandwidth[1]);
-    fflush(stdout);
+    FILE *fp = fopen("bcast_pmem.dat","a");
+    //    fprintf(fp, "#data_size [GiB] D2D_BW P2P_BW\n");
+    fprintf(fp, "%12.4e %12.4e %12.4e\n", data_size_in_GiB, bandwidth[0], bandwidth[1]);
+    fclose(fp);
   }  
 
   free(dmesh);
