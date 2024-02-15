@@ -1,6 +1,6 @@
 CC=icx
 CFLAGS=-O3
-CFLAGS+=-qopenmp
+CFLAGS+=-fiopenmp
 
 PMEM_IO_SERIAL_OBJ = pmem_io_serial.o
 PMEM_IO_SERIAL_DEP := $(PMEM_IO_SERIAL_OBJ)
