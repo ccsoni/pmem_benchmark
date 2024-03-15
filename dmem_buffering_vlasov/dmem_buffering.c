@@ -39,6 +39,14 @@ float timing(struct timespec _start, struct timespec _stop)
   return (stop_time - start_time) * 1.0e-3;
 }
 
+void calc_upwind (float *df_tmp_, float *df_cpy_,double cfl_){
+    int NPADD = 4;
+    for(int ivv = 0;ivv<NMESH_VX;ivv ++ ){
+        int iv = ivv + NPADD;
+        df_tmp_[iv] = df_cpy_[iv] - cfl_*(df_cpy_[iv + 1] - df_cpy_[iv - 1]);
+    }
+}
+
 int main(int argc, char **argv)
 {
   struct pos_grid *df;
@@ -166,7 +174,7 @@ int main(int argc, char **argv)
   vz_end = NMESH_VZ;
 
   const int32_t NMESH_VX_WP = NMESH_VX + NPADD + NPADD;
-    
+  double cfl = 0.25;
 #pragma omp parallel
   {
     // struct vflux *flux;
@@ -186,9 +194,9 @@ int main(int argc, char **argv)
 #pragma omp for schedule(auto) collapse(3)
     for(int32_t ix = 0; ix < NMESH_X; ix++){
       for(int32_t iy = 0; iy < NMESH_Y; iy++){
-	for(int32_t iz = 0; iz < NMESH_Z; iz++){
-	  for(int32_t ivy = vy_start; ivy < vy_end; ivy++){
-	    for(int32_t ivz = vz_start; ivz < vz_end; ivz++){
+		for(int32_t iz = 0; iz < NMESH_Z; iz++){
+	  		for(int32_t ivy = vy_start; ivy < vy_end; ivy++){
+	    		for(int32_t ivz = vz_start; ivz < vz_end; ivz++){
 
 	      for(int32_t ivx = 0; ivx < NMESH_VX; ivx++){
 		int32_t ivx_wp = ivx + NPADD;
@@ -199,7 +207,7 @@ int main(int argc, char **argv)
 		df_cpy[ipadd] = df_cpy[NPADD];
 		df_cpy[ipadd + NMESH_VX + NPADD] = df_cpy[NMESH_VX + NPADD - 1];
 	      }
-
+			calc_upwind(df_tmp,df_cpy,cfl);
 	      // /* Semi-Lagrange scheme */
 	      // calc_flux_vel(df_cpy, flux, &ta);
 	      // check_positivity_vel(df_check, df_tmp, df_cpy, flux, &ta);//flux
