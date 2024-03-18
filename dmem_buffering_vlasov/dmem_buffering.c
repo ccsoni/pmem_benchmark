@@ -42,7 +42,7 @@ void calc_upwind(float *df_tmp_, float *df_cpy_, double cfl_) {
   int NPADD = 4;
   for (int ivv = 0; ivv < NMESH_VX; ivv++) {
     int iv = ivv + NPADD;
-    df_tmp_[iv] = df_cpy_[iv] - cfl_ * (df_cpy_[iv + 1] - df_cpy_[iv - 1]);
+    df_tmp_[iv] = df_cpy_[iv] - cfl_ * (df_cpy_[iv] - df_cpy_[iv - 1]);
   }
 }
 
@@ -76,6 +76,7 @@ int main(int argc, char **argv) {
   float *dmem_buf = (float *)malloc(sizeof(float) * NMESH_VEL);
 
   // loop 1 : substituting immediate values to the DF
+
   clock_gettime(CLOCK_MONOTONIC, &ts_loop1_start);
 #pragma omp parallel for collapse(3) schedule(auto)
   for (int32_t ix = 0; ix < NMESH_X; ix++) {
@@ -115,7 +116,7 @@ int main(int argc, char **argv) {
   }
 
   clock_gettime(CLOCK_MONOTONIC, &ts_loop1_stop);
-  printf("%14.6e\n", timing(ts_loop1_start, ts_loop1_stop));
+  printf("loop 1: %14.6e\n", timing(ts_loop1_start, ts_loop1_stop));
 
   // loop 2 : fetching data from the DF
   clock_gettime(CLOCK_MONOTONIC, &ts_loop2_start);
@@ -155,7 +156,7 @@ int main(int argc, char **argv) {
     }
   }
   clock_gettime(CLOCK_MONOTONIC, &ts_loop2_stop);
-  printf("%14.6e\n", timing(ts_loop2_start, ts_loop2_stop));
+  printf("loop2 : %14.6e\n", timing(ts_loop2_start, ts_loop2_stop));
 
   // loop 3 : as-is code of the integrate_vx without SIMD instructions
   clock_gettime(CLOCK_MONOTONIC, &ts_loop3_start);
@@ -234,9 +235,10 @@ int main(int argc, char **argv) {
 
   }  // end omp parallel
   clock_gettime(CLOCK_MONOTONIC, &ts_loop3_stop);
-  printf("%14.6e\n", timing(ts_loop3_start, ts_loop3_stop));
+  printf("loop3 : %14.6e\n", timing(ts_loop3_start, ts_loop3_stop));
 
   // loop 4 : memcpy and loopcpy code of the integrate_vx without SIMD
+#ifdef __PMEM__
   clock_gettime(CLOCK_MONOTONIC, &ts_loop4_start);
   // int32_t NPADD = 4;
 
@@ -256,14 +258,13 @@ int main(int argc, char **argv) {
 #pragma omp parallel
   {
     // struct vflux *flux;
-    double *flux;
-    float *df_tmp, *df_cpy, *df_check;
+    float *df_tmp, *df_cpy;
 
     // flux = (struct vflux *)malloc(sizeof(struct vflux) * NMESH_VX_WP);
-    flux = (double *)malloc(sizeof(double) * NMESH_VX_WP);
+    // flux = (double *)malloc(sizeof(double) * NMESH_VX_WP);
     df_cpy = (float *)malloc(sizeof(float) * NMESH_VX_WP);
     df_tmp = (float *)malloc(sizeof(float) * NMESH_VX_WP);
-    df_check = (float *)malloc(sizeof(float) * NMESH_VX_WP);
+    // df_check = (float *)malloc(sizeof(float) * NMESH_VX_WP);
 
     for (int32_t ivx = 0; ivx < NMESH_VX_WP; ivx++) {
       df_tmp[ivx] = 0.0;  // for measures of nan=0*nan.
@@ -275,16 +276,15 @@ int main(int argc, char **argv) {
         for (int32_t iz = 0; iz < NMESH_Z; iz++) {
           for (int32_t ivy = vy_start; ivy < vy_end; ivy++) {
             for (int32_t ivz = vz_start; ivz < vz_end; ivz++) {
+#ifdef __PMEM_MEMCPY__
+              memcpy(df_cpy + NPADD, DF(ix, iy, iz).vel_grid,
+                     sizeof(float) * NMESH_VX);
+#elif __PMEM_LOOP__
               for (int32_t ivx = vx_start; ivx < vx_end; ivx++) {
                 int32_t ivx_wp = ivx + NPADD;
-#ifdef __PMEM_MEMCPY__
-                memcpy(df_cpy, DF(ix, iy, iz).vel_grid,
-                       sizeof(float) * NMESH_VX_WP);
-#elif __PMEM_LOOP__
                 df_cpy[ivx_wp] = DF(ix, iy, iz).vel_grid[ivx][ivy][ivz];
-#endif
               }
-
+#endif
               for (int32_t ipadd = 0; ipadd < NPADD; ipadd++) {
                 df_cpy[ipadd] = df_cpy[NPADD];
                 df_cpy[ipadd + NMESH_VX + NPADD] = df_cpy[NMESH_VX + NPADD - 1];
@@ -296,27 +296,31 @@ int main(int argc, char **argv) {
               // &ta);//flux
 
               // for(int32_t ivx=0;ivx<NMESH_VX;ivx++) {
+#ifdef __PMEM_MEMCPY__
+              pmem_memcpy(DF(ix, iy, iz).vel_grid, df_tmp + NPADD,
+                          sizeof(float) * NMESH_VX, PMEM_F_MEM_NONTEMPORAL);
+#elif __PMEM_LOOP__
               for (int32_t ivx = vx_start; ivx < vx_end; ivx++) {
                 int32_t ivx_wp = ivx + NPADD;
                 DF(ix, iy, iz).vel_grid[ivx][ivy][ivz] = df_tmp[ivx_wp];
-                // printf("%f %f\n", DF(ix, iy, iz).vel_grid[ivx][ivy][ivz],
-                //        df_cpy[ivx_wp] -
-                //            cfl * (df_cpy[ivx_wp + 1] - df_cpy[ivx_wp - 1]));
               }  // ivx
-            }    // ivz
-          }      // ivy
+#endif
+              // printf("%f %f\n", DF(ix, iy, iz).vel_grid[ivx][ivy][ivz],
+              //        df_cpy[ivx_wp] -
+              //            cfl * (df_cpy[ivx_wp + 1] - df_cpy[ivx_wp - 1]));
+            }  // ivz
+          }    // ivy
         }
       }
     }  // ix*iy*iz, end omp for
 
-    free(df_check);
     free(df_cpy);
     free(df_tmp);
-    free(flux);
 
   }  // end omp parallel
   clock_gettime(CLOCK_MONOTONIC, &ts_loop4_stop);
-  printf("%14.6e\n", timing(ts_loop4_start, ts_loop4_stop));
+  printf("loop4 : %14.6e\n", timing(ts_loop4_start, ts_loop4_stop));
+#endif
 
   // loop 5 : w/ DF_DRAM code of the integrate_vx without SIMD instructions
 #ifdef __PMEM__
@@ -339,14 +343,11 @@ int main(int argc, char **argv) {
 #pragma omp parallel
   {
     // struct vflux *flux;
-    double *flux;
-    float *df_tmp, *df_cpy, *df_check;
+    float *df_tmp, *df_cpy;
 
     // flux = (struct vflux *)malloc(sizeof(struct vflux) * NMESH_VX_WP);
-    flux = (double *)malloc(sizeof(double) * NMESH_VX_WP);
     df_cpy = (float *)malloc(sizeof(float) * NMESH_VX_WP);
     df_tmp = (float *)malloc(sizeof(float) * NMESH_VX_WP);
-    df_check = (float *)malloc(sizeof(float) * NMESH_VX_WP);
 
     for (int32_t ivx = 0; ivx < NMESH_VX_WP; ivx++) {
       df_tmp[ivx] = 0.0;  // for measures of nan=0*nan.
@@ -396,7 +397,8 @@ int main(int argc, char **argv) {
                 DRAM_DF_vel(ivx, ivy, ivz) = df_tmp[ivx_wp];
                 // printf("%f %f\n", DRAM_DF_vel(ivx, ivy, ivz),
                 //        df_cpy[ivx_wp] -
-                //            cfl * (df_cpy[ivx_wp + 1] - df_cpy[ivx_wp - 1]));
+                //            cfl * (df_cpy[ivx_wp + 1] - df_cpy[ivx_wp -
+                //            1]));
               }  // ivx
             }    // ivz
           }      // ivy
@@ -420,14 +422,12 @@ int main(int argc, char **argv) {
       }
     }  // ix*iy*iz, end omp for
 
-    free(df_check);
     free(df_cpy);
     free(df_tmp);
-    free(flux);
 
   }  // end omp parallel
   clock_gettime(CLOCK_MONOTONIC, &ts_loop5_stop);
-  printf("%14.6e\n", timing(ts_loop5_start, ts_loop5_stop));
+  printf("loop5 : %14.6e\n", timing(ts_loop5_start, ts_loop5_stop));
 #endif
 
 #ifdef __PMEM__
