@@ -30,12 +30,15 @@
 #endif
 
 #define ALIGN_SIZE (64)
+#define NMEASURE (2)
 
 float timing(struct timespec _start, struct timespec _stop) {
   uint64_t start_time = _start.tv_sec * 1000 + _start.tv_nsec / 1000000;
   uint64_t stop_time = _stop.tv_sec * 1000 + _stop.tv_nsec / 1000000;
-
   return (stop_time - start_time) * 1.0e-3;
+  // float time = (stop_time - start_time) * 1.0e-3;
+  return (stop_time - start_time) * 1.0e-3;
+  // return time;
 }
 
 void calc_upwind(float *df_tmp_, float *df_cpy_, double cfl_) {
@@ -44,6 +47,466 @@ void calc_upwind(float *df_tmp_, float *df_cpy_, double cfl_) {
     int iv = ivv + NPADD;
     df_tmp_[iv] = df_cpy_[iv] - cfl_ * (df_cpy_[iv] - df_cpy_[iv - 1]);
   }
+}
+
+void integrate_vx_loop3(struct pos_grid *df, double cfl) {
+  // loop 3 : as-is code of the integrate_vx without SIMD instructions
+  int32_t NPADD = 4;
+
+  int32_t vx_start, vx_end;
+  int32_t vy_start, vy_end;
+  int32_t vz_start, vz_end;
+
+  vx_start = 0;
+  vx_end = NMESH_VX;
+  vy_start = 0;
+  vy_end = NMESH_VY;
+  vz_start = 0;
+  vz_end = NMESH_VZ;
+
+  const int32_t NMESH_VX_WP = NMESH_VX + NPADD + NPADD;
+
+#pragma omp parallel
+  {
+    // struct vflux *flux;
+    float *df_tmp, *df_cpy;
+
+    // flux = (struct vflux *)malloc(sizeof(struct vflux) * NMESH_VX_WP);
+    df_cpy = (float *)malloc(sizeof(float) * NMESH_VX_WP);
+    df_tmp = (float *)malloc(sizeof(float) * NMESH_VX_WP);
+
+    for (int32_t ivx = 0; ivx < NMESH_VX_WP; ivx++) {
+      df_tmp[ivx] = 0.0;  // for measures of nan=0*nan.
+    }
+
+#pragma omp for schedule(auto) collapse(3)
+    for (int32_t ix = 0; ix < NMESH_X; ix++) {
+      for (int32_t iy = 0; iy < NMESH_Y; iy++) {
+        for (int32_t iz = 0; iz < NMESH_Z; iz++) {
+          for (int32_t ivy = vy_start; ivy < vy_end; ivy++) {
+            for (int32_t ivz = vz_start; ivz < vz_end; ivz++) {
+              for (int32_t ivx = vx_start; ivx < vx_end; ivx++) {
+                int32_t ivx_wp = ivx + NPADD;
+                df_cpy[ivx_wp] = DF(ix, iy, iz).vel_grid[ivx][ivy][ivz];
+              }
+
+              for (int32_t ipadd = 0; ipadd < NPADD; ipadd++) {
+                df_cpy[ipadd] = df_cpy[NPADD];
+                df_cpy[ipadd + NMESH_VX + NPADD] = df_cpy[NMESH_VX + NPADD - 1];
+              }
+              calc_upwind(df_tmp, df_cpy, cfl);
+              // /* Semi-Lagrange scheme */
+              // calc_flux_vel(df_cpy, flux, &ta);
+              // check_positivity_vel(df_check, df_tmp, df_cpy, flux,
+              // &ta);//flux
+
+              // for(int32_t ivx=0;ivx<NMESH_VX;ivx++) {
+              for (int32_t ivx = vx_start; ivx < vx_end; ivx++) {
+                int32_t ivx_wp = ivx + NPADD;
+                // DF(ix, iy, iz).vel_grid[ivx][ivy][ivz] = df_tmp[ivx_wp];
+                DF(ix, iy, iz).vel_grid[ivx][ivy][ivz] = df_tmp[ivx_wp];
+                // printf("%f %f\n", DF(ix, iy, iz).vel_grid[ivx][ivy][ivz],
+                //        df_cpy[ivx_wp] -
+                //            cfl * (df_cpy[ivx_wp + 1] - df_cpy[ivx_wp -
+                //            1]));
+              }
+
+            }  // ivz
+          }    // ivy
+        }
+      }
+    }  // ix*iy*iz, end omp for
+
+    free(df_cpy);
+    free(df_tmp);
+
+  }  // end omp parallel
+}
+
+void integrate_vx_loop4(struct pos_grid *df, double cfl) {
+  // loop 4 : Data transfer from PMEM to DMEM is performed inside
+  // the velocity loop (innermost region) both in the memcpy and loop methods.
+#ifdef __PMEM__
+  int32_t NPADD = 4;
+
+  int32_t vx_start, vx_end;
+  int32_t vy_start, vy_end;
+  int32_t vz_start, vz_end;
+
+  vx_start = 0;
+  vx_end = NMESH_VX;
+  vy_start = 0;
+  vy_end = NMESH_VY;
+  vz_start = 0;
+  vz_end = NMESH_VZ;
+
+  const int32_t NMESH_VX_WP = NMESH_VX + NPADD + NPADD;
+
+#pragma omp parallel
+  {
+    float *df_tmp, *df_cpy;
+    df_cpy = (float *)malloc(sizeof(float) * NMESH_VX_WP);
+    df_tmp = (float *)malloc(sizeof(float) * NMESH_VX_WP);
+
+    for (int32_t ivx = 0; ivx < NMESH_VX_WP; ivx++) {
+      df_tmp[ivx] = 0.0;  // for measures of nan=0*nan.
+    }
+
+#pragma omp for schedule(auto) collapse(3)
+    for (int32_t ix = 0; ix < NMESH_X; ix++) {
+      for (int32_t iy = 0; iy < NMESH_Y; iy++) {
+        for (int32_t iz = 0; iz < NMESH_Z; iz++) {
+          for (int32_t ivy = vy_start; ivy < vy_end; ivy++) {
+            for (int32_t ivz = vz_start; ivz < vz_end; ivz++) {
+#ifdef __PMEM_MEMCPY__
+              memcpy(df_cpy + NPADD, DF(ix, iy, iz).vel_grid,
+                     sizeof(float) * NMESH_VX);
+#elif __PMEM_LOOP__
+              for (int32_t ivx = vx_start; ivx < vx_end; ivx++) {
+                int32_t ivx_wp = ivx + NPADD;
+                df_cpy[ivx_wp] = DF(ix, iy, iz).vel_grid[ivx][ivy][ivz];
+              }
+#endif
+              for (int32_t ipadd = 0; ipadd < NPADD; ipadd++) {
+                df_cpy[ipadd] = df_cpy[NPADD];
+                df_cpy[ipadd + NMESH_VX + NPADD] = df_cpy[NMESH_VX + NPADD - 1];
+              }
+              calc_upwind(df_tmp, df_cpy, cfl);
+              // /* Semi-Lagrange scheme */
+              // calc_flux_vel(df_cpy, flux, &ta);
+              // check_positivity_vel(df_check, df_tmp, df_cpy, flux,
+              // &ta);//flux
+
+              // for(int32_t ivx=0;ivx<NMESH_VX;ivx++) {
+#ifdef __PMEM_MEMCPY__
+              pmem_memcpy(DF(ix, iy, iz).vel_grid, df_tmp + NPADD,
+                          sizeof(float) * NMESH_VX, PMEM_F_MEM_NONTEMPORAL);
+#elif __PMEM_LOOP__
+              for (int32_t ivx = vx_start; ivx < vx_end; ivx++) {
+                int32_t ivx_wp = ivx + NPADD;
+                DF(ix, iy, iz).vel_grid[ivx][ivy][ivz] = df_tmp[ivx_wp];
+              }  // ivx
+#endif
+            }  // ivz
+          }    // ivy
+        }
+      }
+    }  // ix*iy*iz, end omp for
+
+    free(df_cpy);
+    free(df_tmp);
+
+  }  // end omp parallel
+#endif
+}
+
+void integrate_vx_loop5(struct pos_grid *df, double cfl) {
+  // loop 5 : Data transfer from PMEM to DMEM is performed
+  // in the middle of spatial and velocity loops. Buffer region in the DMEM
+  // is allocated inside the spatial loop.
+#ifdef __PMEM__
+  int32_t NPADD = 4;
+
+  int32_t vx_start, vx_end;
+  int32_t vy_start, vy_end;
+  int32_t vz_start, vz_end;
+
+  vx_start = 0;
+  vx_end = NMESH_VX;
+  vy_start = 0;
+  vy_end = NMESH_VY;
+  vz_start = 0;
+  vz_end = NMESH_VZ;
+
+  const int32_t NMESH_VX_WP = NMESH_VX + NPADD + NPADD;
+#pragma omp parallel
+  {
+    // struct vflux *flux;
+    float *df_tmp, *df_cpy;
+
+    // flux = (struct vflux *)malloc(sizeof(struct vflux) * NMESH_VX_WP);
+    df_cpy = (float *)malloc(sizeof(float) * NMESH_VX_WP);
+    df_tmp = (float *)malloc(sizeof(float) * NMESH_VX_WP);
+
+    for (int32_t ivx = 0; ivx < NMESH_VX_WP; ivx++) {
+      df_tmp[ivx] = 0.0;  // for measures of nan=0*nan.
+    }
+
+#pragma omp for schedule(auto) collapse(3)
+    for (int32_t ix = 0; ix < NMESH_X; ix++) {
+      for (int32_t iy = 0; iy < NMESH_Y; iy++) {
+        for (int32_t iz = 0; iz < NMESH_Z; iz++) {
+#ifdef __PMEM_MEMCPY__
+          float *df_dram = aligned_alloc(
+              ALIGN_SIZE, sizeof(float) * NMESH_VX * NMESH_VY * NMESH_VZ);
+          memcpy(df_dram, DF(ix, iy, iz).vel_grid,
+                 sizeof(float) * NMESH_VX * NMESH_VY * NMESH_VZ);
+#elif __PMEM_LOOP__
+          float *df_dram = aligned_alloc(
+              ALIGN_SIZE, sizeof(float) * NMESH_VX * NMESH_VY * NMESH_VZ);
+          for (int32_t ivy = vy_start; ivy < vy_end; ivy++) {
+            for (int32_t ivz = vz_start; ivz < vz_end; ivz++) {
+              for (int32_t ivx = vx_start; ivx < vx_end; ivx++) {
+                df_dram[(ivz) + NMESH_VZ * ((ivy) + NMESH_VY * (ivx))] =
+                    DF(ix, iy, iz).vel_grid[ivx][ivy][ivz];
+              }
+            }
+          }
+#endif
+          for (int32_t ivy = vy_start; ivy < vy_end; ivy++) {
+            for (int32_t ivz = vz_start; ivz < vz_end; ivz++) {
+              for (int32_t ivx = vx_start; ivx < vx_end; ivx++) {
+                int32_t ivx_wp = ivx + NPADD;
+                df_cpy[ivx_wp] = DRAM_DF_vel(ivx, ivy, ivz);
+              }
+
+              for (int32_t ipadd = 0; ipadd < NPADD; ipadd++) {
+                df_cpy[ipadd] = df_cpy[NPADD];
+                df_cpy[ipadd + NMESH_VX + NPADD] = df_cpy[NMESH_VX + NPADD - 1];
+              }
+              calc_upwind(df_tmp, df_cpy, cfl);
+              // /* Semi-Lagrange scheme */
+              // calc_flux_vel(df_cpy, flux, &ta);
+              // check_positivity_vel(df_check, df_tmp, df_cpy, flux,
+              // &ta);//flux
+
+              // for(int32_t ivx=0;ivx<NMESH_VX;ivx++) {
+              for (int32_t ivx = vx_start; ivx < vx_end; ivx++) {
+                int32_t ivx_wp = ivx + NPADD;
+                DRAM_DF_vel(ivx, ivy, ivz) = df_tmp[ivx_wp];
+                // printf("%f %f\n", DRAM_DF_vel(ivx, ivy, ivz),
+                //        df_cpy[ivx_wp] -
+                //            cfl * (df_cpy[ivx_wp + 1] - df_cpy[ivx_wp -
+                //            1]));
+              }  // ivx
+            }    // ivz
+          }      // ivy
+#ifdef __PMEM_MEMCPY__
+          pmem_memcpy(DF(ix, iy, iz).vel_grid, df_dram,
+                      sizeof(float) * NMESH_VX * NMESH_VY * NMESH_VZ,
+                      PMEM_F_MEM_NONTEMPORAL);
+          free(df_dram);
+#elif __PMEM_LOOP__
+          for (int32_t ivy = vy_start; ivy < vy_end; ivy++) {
+            for (int32_t ivz = vz_start; ivz < vz_end; ivz++) {
+              for (int32_t ivx = vx_start; ivx < vx_end; ivx++) {
+                DF(ix, iy, iz).vel_grid[ivx][ivy][ivz] =
+                    df_dram[(ivz) + NMESH_VZ * ((ivy) + NMESH_VY * (ivx))];
+              }
+            }
+          }
+          free(df_dram);
+#endif
+        }
+      }
+    }  // ix*iy*iz, end omp for
+
+    free(df_cpy);
+    free(df_tmp);
+
+  }  // end omp parallel
+#endif
+}
+
+void integrate_vx_loop6(struct pos_grid *df, double cfl) {
+// loop 6 : Same as loop 5 but the buffer region in DMEM is allocated
+// outside the spatial loop.
+#ifdef __PMEM__
+  int32_t NPADD = 4;
+
+  int32_t vx_start, vx_end;
+  int32_t vy_start, vy_end;
+  int32_t vz_start, vz_end;
+
+  vx_start = 0;
+  vx_end = NMESH_VX;
+  vy_start = 0;
+  vy_end = NMESH_VY;
+  vz_start = 0;
+  vz_end = NMESH_VZ;
+
+  const int32_t NMESH_VX_WP = NMESH_VX + NPADD + NPADD;
+
+#pragma omp parallel
+  {
+    // struct vflux *flux;
+    float *df_tmp, *df_cpy;
+
+    // flux = (struct vflux *)malloc(sizeof(struct vflux) * NMESH_VX_WP);
+    df_cpy = (float *)malloc(sizeof(float) * NMESH_VX_WP);
+    df_tmp = (float *)malloc(sizeof(float) * NMESH_VX_WP);
+
+    float *df_dram = aligned_alloc(
+        ALIGN_SIZE, sizeof(float) * NMESH_VX * NMESH_VY * NMESH_VZ);
+
+    for (int32_t ivx = 0; ivx < NMESH_VX_WP; ivx++) {
+      df_tmp[ivx] = 0.0;  // for measures of nan=0*nan.
+    }
+
+#pragma omp for schedule(auto) collapse(3)
+    for (int32_t ix = 0; ix < NMESH_X; ix++) {
+      for (int32_t iy = 0; iy < NMESH_Y; iy++) {
+        for (int32_t iz = 0; iz < NMESH_Z; iz++) {
+#ifdef __PMEM_MEMCPY__
+          memcpy(df_dram, DF(ix, iy, iz).vel_grid,
+                 sizeof(float) * NMESH_VX * NMESH_VY * NMESH_VZ);
+#elif __PMEM_LOOP__
+          for (int32_t ivy = vy_start; ivy < vy_end; ivy++) {
+            for (int32_t ivz = vz_start; ivz < vz_end; ivz++) {
+              for (int32_t ivx = vx_start; ivx < vx_end; ivx++) {
+                df_dram[(ivz) + NMESH_VZ * ((ivy) + NMESH_VY * (ivx))] =
+                    DF(ix, iy, iz).vel_grid[ivx][ivy][ivz];
+              }
+            }
+          }
+#endif
+          for (int32_t ivy = vy_start; ivy < vy_end; ivy++) {
+            for (int32_t ivz = vz_start; ivz < vz_end; ivz++) {
+              for (int32_t ivx = vx_start; ivx < vx_end; ivx++) {
+                int32_t ivx_wp = ivx + NPADD;
+                df_cpy[ivx_wp] = DRAM_DF_vel(ivx, ivy, ivz);
+              }
+
+              for (int32_t ipadd = 0; ipadd < NPADD; ipadd++) {
+                df_cpy[ipadd] = df_cpy[NPADD];
+                df_cpy[ipadd + NMESH_VX + NPADD] = df_cpy[NMESH_VX + NPADD - 1];
+              }
+              calc_upwind(df_tmp, df_cpy, cfl);
+              // /* Semi-Lagrange scheme */
+              // calc_flux_vel(df_cpy, flux, &ta);
+              // check_positivity_vel(df_check, df_tmp, df_cpy, flux,
+              // &ta);//flux
+
+              // for(int32_t ivx=0;ivx<NMESH_VX;ivx++) {
+              for (int32_t ivx = vx_start; ivx < vx_end; ivx++) {
+                int32_t ivx_wp = ivx + NPADD;
+                DRAM_DF_vel(ivx, ivy, ivz) = df_tmp[ivx_wp];
+                // printf("%f %f\n", DRAM_DF_vel(ivx, ivy, ivz),
+                //        df_cpy[ivx_wp] -
+                //            cfl * (df_cpy[ivx_wp + 1] - df_cpy[ivx_wp -
+                //            1]));
+              }  // ivx
+            }    // ivz
+          }      // ivy
+#ifdef __PMEM_MEMCPY__
+          pmem_memcpy(DF(ix, iy, iz).vel_grid, df_dram,
+                      sizeof(float) * NMESH_VX * NMESH_VY * NMESH_VZ,
+                      PMEM_F_MEM_NONTEMPORAL);
+#elif __PMEM_LOOP__
+          for (int32_t ivy = vy_start; ivy < vy_end; ivy++) {
+            for (int32_t ivz = vz_start; ivz < vz_end; ivz++) {
+              for (int32_t ivx = vx_start; ivx < vx_end; ivx++) {
+                DF(ix, iy, iz).vel_grid[ivx][ivy][ivz] =
+                    df_dram[(ivz) + NMESH_VZ * ((ivy) + NMESH_VY * (ivx))];
+              }
+            }
+          }
+#endif
+        }
+      }
+    }  // ix*iy*iz, end omp for
+
+    free(df_cpy);
+    free(df_tmp);
+    free(df_dram);
+  }  // end omp parallel
+#endif
+}
+
+void integrate_vx_loop7(struct pos_grid *df, double cfl) {
+  // loop 7 : Same as loop 6 but direct write back df_tmp to PMEM
+#ifdef __PMEM__
+  int32_t NPADD = 4;
+
+  int32_t vx_start, vx_end;
+  int32_t vy_start, vy_end;
+  int32_t vz_start, vz_end;
+
+  vx_start = 0;
+  vx_end = NMESH_VX;
+  vy_start = 0;
+  vy_end = NMESH_VY;
+  vz_start = 0;
+  vz_end = NMESH_VZ;
+
+  const int32_t NMESH_VX_WP = NMESH_VX + NPADD + NPADD;
+
+#pragma omp parallel
+  {
+    // struct vflux *flux;
+    float *df_tmp, *df_cpy;
+
+    // flux = (struct vflux *)malloc(sizeof(struct vflux) * NMESH_VX_WP);
+    df_cpy = (float *)malloc(sizeof(float) * NMESH_VX_WP);
+    df_tmp = (float *)malloc(sizeof(float) * NMESH_VX_WP);
+
+    float *df_dram = aligned_alloc(
+        ALIGN_SIZE, sizeof(float) * NMESH_VX * NMESH_VY * NMESH_VZ);
+
+    for (int32_t ivx = 0; ivx < NMESH_VX_WP; ivx++) {
+      df_tmp[ivx] = 0.0;  // for measures of nan=0*nan.
+    }
+
+// #pragma omp for schedule(auto) collapse(3) nowait
+#pragma omp for schedule(auto) collapse(3)
+    for (int32_t ix = 0; ix < NMESH_X; ix++) {
+      for (int32_t iy = 0; iy < NMESH_Y; iy++) {
+        for (int32_t iz = 0; iz < NMESH_Z; iz++) {
+#ifdef __PMEM_MEMCPY__
+          memcpy(df_dram, DF(ix, iy, iz).vel_grid,
+                 sizeof(float) * NMESH_VX * NMESH_VY * NMESH_VZ);
+#elif __PMEM_LOOP__
+          for (int32_t ivy = vy_start; ivy < vy_end; ivy++) {
+            for (int32_t ivz = vz_start; ivz < vz_end; ivz++) {
+              for (int32_t ivx = vx_start; ivx < vx_end; ivx++) {
+                df_dram[(ivz) + NMESH_VZ * ((ivy) + NMESH_VY * (ivx))] =
+                    DF(ix, iy, iz).vel_grid[ivx][ivy][ivz];
+              }
+            }
+          }
+#endif
+          for (int32_t ivy = vy_start; ivy < vy_end; ivy++) {
+            for (int32_t ivz = vz_start; ivz < vz_end; ivz++) {
+              for (int32_t ivx = vx_start; ivx < vx_end; ivx++) {
+                int32_t ivx_wp = ivx + NPADD;
+                df_cpy[ivx_wp] = DRAM_DF_vel(ivx, ivy, ivz);
+              }
+
+              for (int32_t ipadd = 0; ipadd < NPADD; ipadd++) {
+                df_cpy[ipadd] = df_cpy[NPADD];
+                df_cpy[ipadd + NMESH_VX + NPADD] = df_cpy[NMESH_VX + NPADD - 1];
+              }
+              calc_upwind(df_tmp, df_cpy, cfl);
+              // /* Semi-Lagrange scheme */
+              // calc_flux_vel(df_cpy, flux, &ta);
+              // check_positivity_vel(df_check, df_tmp, df_cpy, flux,
+              // &ta);//flux
+
+              // for(int32_t ivx=0;ivx<NMESH_VX;ivx++) {
+#ifdef __PMEM_MEMCPY__
+              pmem_memcpy(DF(ix, iy, iz).vel_grid, df_tmp + NPADD,
+                          sizeof(float) * NMESH_VX, PMEM_F_MEM_NONTEMPORAL);
+#elif __PMEM_LOOP__
+              for (int32_t ivx = vx_start; ivx < vx_end; ivx++) {
+                int32_t ivx_wp = ivx + NPADD;
+                DF(ix, iy, iz).vel_grid[ivx][ivy][ivz] = df_tmp[ivx_wp];
+                // printf("%f %f\n", DRAM_DF_vel(ivx, ivy, ivz),
+                //        df_cpy[ivx_wp] -
+                //            cfl * (df_cpy[ivx_wp + 1] - df_cpy[ivx_wp -
+                //            1]));
+              }  // ivx
+#endif
+            }  // ivz
+          }    // ivy
+        }
+      }
+    }  // ix*iy*iz, end omp for
+
+    free(df_cpy);
+    free(df_tmp);
+    free(df_dram);
+  }  // end omp parallel
+#endif
 }
 
 int main(int argc, char **argv) {
@@ -160,483 +623,60 @@ int main(int argc, char **argv) {
   clock_gettime(CLOCK_MONOTONIC, &ts_loop2_stop);
   printf("loop2 : %14.6e\n", timing(ts_loop2_start, ts_loop2_stop));
 
+  const double cfl = 0.25;
   // loop 3 : as-is code of the integrate_vx without SIMD instructions
-  clock_gettime(CLOCK_MONOTONIC, &ts_loop3_start);
-  int32_t NPADD = 4;
-
-  int32_t vx_start, vx_end;
-  int32_t vy_start, vy_end;
-  int32_t vz_start, vz_end;
-
-  vx_start = 0;
-  vx_end = NMESH_VX;
-  vy_start = 0;
-  vy_end = NMESH_VY;
-  vz_start = 0;
-  vz_end = NMESH_VZ;
-
-  const int32_t NMESH_VX_WP = NMESH_VX + NPADD + NPADD;
-  double cfl = 0.25;
-#pragma omp parallel
-  {
-    // struct vflux *flux;
-    double *flux;
-    float *df_tmp, *df_cpy, *df_check;
-
-    // flux = (struct vflux *)malloc(sizeof(struct vflux) * NMESH_VX_WP);
-    flux = (double *)malloc(sizeof(double) * NMESH_VX_WP);
-    df_cpy = (float *)malloc(sizeof(float) * NMESH_VX_WP);
-    df_tmp = (float *)malloc(sizeof(float) * NMESH_VX_WP);
-    df_check = (float *)malloc(sizeof(float) * NMESH_VX_WP);
-
-    for (int32_t ivx = 0; ivx < NMESH_VX_WP; ivx++) {
-      df_tmp[ivx] = 0.0;  // for measures of nan=0*nan.
-    }
-
-#pragma omp for schedule(auto) collapse(3)
-    for (int32_t ix = 0; ix < NMESH_X; ix++) {
-      for (int32_t iy = 0; iy < NMESH_Y; iy++) {
-        for (int32_t iz = 0; iz < NMESH_Z; iz++) {
-          for (int32_t ivy = vy_start; ivy < vy_end; ivy++) {
-            for (int32_t ivz = vz_start; ivz < vz_end; ivz++) {
-              for (int32_t ivx = vx_start; ivx < vx_end; ivx++) {
-                int32_t ivx_wp = ivx + NPADD;
-                df_cpy[ivx_wp] = DF(ix, iy, iz).vel_grid[ivx][ivy][ivz];
-              }
-
-              for (int32_t ipadd = 0; ipadd < NPADD; ipadd++) {
-                df_cpy[ipadd] = df_cpy[NPADD];
-                df_cpy[ipadd + NMESH_VX + NPADD] = df_cpy[NMESH_VX + NPADD - 1];
-              }
-              calc_upwind(df_tmp, df_cpy, cfl);
-              // /* Semi-Lagrange scheme */
-              // calc_flux_vel(df_cpy, flux, &ta);
-              // check_positivity_vel(df_check, df_tmp, df_cpy, flux,
-              // &ta);//flux
-
-              // for(int32_t ivx=0;ivx<NMESH_VX;ivx++) {
-              for (int32_t ivx = vx_start; ivx < vx_end; ivx++) {
-                int32_t ivx_wp = ivx + NPADD;
-                // DF(ix, iy, iz).vel_grid[ivx][ivy][ivz] = df_tmp[ivx_wp];
-                DF(ix, iy, iz).vel_grid[ivx][ivy][ivz] = df_tmp[ivx_wp];
-                // printf("%f %f\n", DF(ix, iy, iz).vel_grid[ivx][ivy][ivz],
-                //        df_cpy[ivx_wp] -
-                //            cfl * (df_cpy[ivx_wp + 1] - df_cpy[ivx_wp - 1]));
-              }
-
-            }  // ivz
-          }    // ivy
-        }
-      }
-    }  // ix*iy*iz, end omp for
-
-    free(df_check);
-    free(df_cpy);
-    free(df_tmp);
-    free(flux);
-
-  }  // end omp parallel
-  clock_gettime(CLOCK_MONOTONIC, &ts_loop3_stop);
-  printf("loop3 : %14.6e\n", timing(ts_loop3_start, ts_loop3_stop));
+  float time_loop3 = 0;
+  for (int n = 0; n < NMEASURE; n++) {
+    clock_gettime(CLOCK_MONOTONIC, &ts_loop3_start);
+    integrate_vx_loop3(df, cfl);
+    clock_gettime(CLOCK_MONOTONIC, &ts_loop3_stop);
+    time_loop3 += timing(ts_loop3_start, ts_loop3_stop);
+  }
+  printf("loop3 : %14.6e\n", time_loop3 / (float)NMEASURE);
 
   // loop 4 : Data transfer from PMEM to DMEM is performed inside
   // the velocity loop (innermost region) both in the memcpy and loop methods.
-#ifdef __PMEM__
-  clock_gettime(CLOCK_MONOTONIC, &ts_loop4_start);
-  // int32_t NPADD = 4;
-
-  // int32_t vx_start, vx_end;
-  // int32_t vy_start, vy_end;
-  // int32_t vz_start, vz_end;
-
-  vx_start = 0;
-  vx_end = NMESH_VX;
-  vy_start = 0;
-  vy_end = NMESH_VY;
-  vz_start = 0;
-  vz_end = NMESH_VZ;
-
-  // const int32_t NMESH_VX_WP = NMESH_VX + NPADD + NPADD;
-  // double cfl = 0.25;
-#pragma omp parallel
-  {
-    // struct vflux *flux;
-    float *df_tmp, *df_cpy;
-
-    // flux = (struct vflux *)malloc(sizeof(struct vflux) * NMESH_VX_WP);
-    // flux = (double *)malloc(sizeof(double) * NMESH_VX_WP);
-    df_cpy = (float *)malloc(sizeof(float) * NMESH_VX_WP);
-    df_tmp = (float *)malloc(sizeof(float) * NMESH_VX_WP);
-    // df_check = (float *)malloc(sizeof(float) * NMESH_VX_WP);
-
-    for (int32_t ivx = 0; ivx < NMESH_VX_WP; ivx++) {
-      df_tmp[ivx] = 0.0;  // for measures of nan=0*nan.
-    }
-
-#pragma omp for schedule(auto) collapse(3)
-    for (int32_t ix = 0; ix < NMESH_X; ix++) {
-      for (int32_t iy = 0; iy < NMESH_Y; iy++) {
-        for (int32_t iz = 0; iz < NMESH_Z; iz++) {
-          for (int32_t ivy = vy_start; ivy < vy_end; ivy++) {
-            for (int32_t ivz = vz_start; ivz < vz_end; ivz++) {
-#ifdef __PMEM_MEMCPY__
-              memcpy(df_cpy + NPADD, DF(ix, iy, iz).vel_grid,
-                     sizeof(float) * NMESH_VX);
-#elif __PMEM_LOOP__
-              for (int32_t ivx = vx_start; ivx < vx_end; ivx++) {
-                int32_t ivx_wp = ivx + NPADD;
-                df_cpy[ivx_wp] = DF(ix, iy, iz).vel_grid[ivx][ivy][ivz];
-              }
-#endif
-              for (int32_t ipadd = 0; ipadd < NPADD; ipadd++) {
-                df_cpy[ipadd] = df_cpy[NPADD];
-                df_cpy[ipadd + NMESH_VX + NPADD] = df_cpy[NMESH_VX + NPADD - 1];
-              }
-              calc_upwind(df_tmp, df_cpy, cfl);
-              // /* Semi-Lagrange scheme */
-              // calc_flux_vel(df_cpy, flux, &ta);
-              // check_positivity_vel(df_check, df_tmp, df_cpy, flux,
-              // &ta);//flux
-
-              // for(int32_t ivx=0;ivx<NMESH_VX;ivx++) {
-#ifdef __PMEM_MEMCPY__
-              pmem_memcpy(DF(ix, iy, iz).vel_grid, df_tmp + NPADD,
-                          sizeof(float) * NMESH_VX, PMEM_F_MEM_NONTEMPORAL);
-#elif __PMEM_LOOP__
-              for (int32_t ivx = vx_start; ivx < vx_end; ivx++) {
-                int32_t ivx_wp = ivx + NPADD;
-                DF(ix, iy, iz).vel_grid[ivx][ivy][ivz] = df_tmp[ivx_wp];
-              }  // ivx
-#endif
-              // printf("%f %f\n", DF(ix, iy, iz).vel_grid[ivx][ivy][ivz],
-              //        df_cpy[ivx_wp] -
-              //            cfl * (df_cpy[ivx_wp + 1] - df_cpy[ivx_wp - 1]));
-            }  // ivz
-          }    // ivy
-        }
-      }
-    }  // ix*iy*iz, end omp for
-
-    free(df_cpy);
-    free(df_tmp);
-
-  }  // end omp parallel
-  clock_gettime(CLOCK_MONOTONIC, &ts_loop4_stop);
-  printf("loop4 : %14.6e\n", timing(ts_loop4_start, ts_loop4_stop));
-#endif
+  float time_loop4 = 0;
+  for (int n = 0; n < NMEASURE; n++) {
+    clock_gettime(CLOCK_MONOTONIC, &ts_loop4_start);
+    integrate_vx_loop4(df, cfl);
+    clock_gettime(CLOCK_MONOTONIC, &ts_loop4_stop);
+    time_loop4 += timing(ts_loop4_start, ts_loop4_stop);
+  }
+  printf("loop4 : %14.6e\n", time_loop4 / (float)NMEASURE);
 
   // loop 5 : Data transfer from PMEM to DMEM is performed
   // in the middle of spatial and velocity loops. Buffer region in the DMEM
   // is allocated inside the spatial loop.
-#ifdef __PMEM__
-  clock_gettime(CLOCK_MONOTONIC, &ts_loop5_start);
-  // int32_t NPADD = 4;
+  float time_loop5 = 0;
+  for (int n = 0; n < NMEASURE; n++) {
+    clock_gettime(CLOCK_MONOTONIC, &ts_loop5_start);
+    integrate_vx_loop5(df, cfl);
+    clock_gettime(CLOCK_MONOTONIC, &ts_loop5_stop);
+    time_loop5 += timing(ts_loop5_start, ts_loop5_stop);
+  }
+  printf("loop5 : %14.6e\n", time_loop5 / (float)NMEASURE);
 
-  // int32_t vx_start, vx_end;
-  // int32_t vy_start, vy_end;
-  // int32_t vz_start, vz_end;
-
-  vx_start = 0;
-  vx_end = NMESH_VX;
-  vy_start = 0;
-  vy_end = NMESH_VY;
-  vz_start = 0;
-  vz_end = NMESH_VZ;
-
-  // const int32_t NMESH_VX_WP = NMESH_VX + NPADD + NPADD;
-  // double cfl = 0.25;
-#pragma omp parallel
-  {
-    // struct vflux *flux;
-    float *df_tmp, *df_cpy;
-
-    // flux = (struct vflux *)malloc(sizeof(struct vflux) * NMESH_VX_WP);
-    df_cpy = (float *)malloc(sizeof(float) * NMESH_VX_WP);
-    df_tmp = (float *)malloc(sizeof(float) * NMESH_VX_WP);
-
-    for (int32_t ivx = 0; ivx < NMESH_VX_WP; ivx++) {
-      df_tmp[ivx] = 0.0;  // for measures of nan=0*nan.
-    }
-
-#pragma omp for schedule(auto) collapse(3)
-    for (int32_t ix = 0; ix < NMESH_X; ix++) {
-      for (int32_t iy = 0; iy < NMESH_Y; iy++) {
-        for (int32_t iz = 0; iz < NMESH_Z; iz++) {
-#ifdef __PMEM_MEMCPY__
-          float *df_dram = aligned_alloc(
-              ALIGN_SIZE, sizeof(float) * NMESH_VX * NMESH_VY * NMESH_VZ);
-          memcpy(df_dram, DF(ix, iy, iz).vel_grid,
-                 sizeof(float) * NMESH_VX * NMESH_VY * NMESH_VZ);
-#elif __PMEM_LOOP__
-          float *df_dram = aligned_alloc(
-              ALIGN_SIZE, sizeof(float) * NMESH_VX * NMESH_VY * NMESH_VZ);
-          for (int32_t ivy = vy_start; ivy < vy_end; ivy++) {
-            for (int32_t ivz = vz_start; ivz < vz_end; ivz++) {
-              for (int32_t ivx = vx_start; ivx < vx_end; ivx++) {
-                df_dram[(ivz) + NMESH_VZ * ((ivy) + NMESH_VY * (ivx))] =
-                    DF(ix, iy, iz).vel_grid[ivx][ivy][ivz];
-              }
-            }
-          }
-#endif
-          for (int32_t ivy = vy_start; ivy < vy_end; ivy++) {
-            for (int32_t ivz = vz_start; ivz < vz_end; ivz++) {
-              for (int32_t ivx = vx_start; ivx < vx_end; ivx++) {
-                int32_t ivx_wp = ivx + NPADD;
-                df_cpy[ivx_wp] = DRAM_DF_vel(ivx, ivy, ivz);
-              }
-
-              for (int32_t ipadd = 0; ipadd < NPADD; ipadd++) {
-                df_cpy[ipadd] = df_cpy[NPADD];
-                df_cpy[ipadd + NMESH_VX + NPADD] = df_cpy[NMESH_VX + NPADD - 1];
-              }
-              calc_upwind(df_tmp, df_cpy, cfl);
-              // /* Semi-Lagrange scheme */
-              // calc_flux_vel(df_cpy, flux, &ta);
-              // check_positivity_vel(df_check, df_tmp, df_cpy, flux,
-              // &ta);//flux
-
-              // for(int32_t ivx=0;ivx<NMESH_VX;ivx++) {
-              for (int32_t ivx = vx_start; ivx < vx_end; ivx++) {
-                int32_t ivx_wp = ivx + NPADD;
-                DRAM_DF_vel(ivx, ivy, ivz) = df_tmp[ivx_wp];
-                // printf("%f %f\n", DRAM_DF_vel(ivx, ivy, ivz),
-                //        df_cpy[ivx_wp] -
-                //            cfl * (df_cpy[ivx_wp + 1] - df_cpy[ivx_wp -
-                //            1]));
-              }  // ivx
-            }    // ivz
-          }      // ivy
-#ifdef __PMEM_MEMCPY__
-          pmem_memcpy(DF(ix, iy, iz).vel_grid, df_dram,
-                      sizeof(float) * NMESH_VX * NMESH_VY * NMESH_VZ,
-                      PMEM_F_MEM_NONTEMPORAL);
-          free(df_dram);
-#elif __PMEM_LOOP__
-          for (int32_t ivy = vy_start; ivy < vy_end; ivy++) {
-            for (int32_t ivz = vz_start; ivz < vz_end; ivz++) {
-              for (int32_t ivx = vx_start; ivx < vx_end; ivx++) {
-                DF(ix, iy, iz).vel_grid[ivx][ivy][ivz] =
-                    df_dram[(ivz) + NMESH_VZ * ((ivy) + NMESH_VY * (ivx))];
-              }
-            }
-          }
-          free(df_dram);
-#endif
-        }
-      }
-    }  // ix*iy*iz, end omp for
-
-    free(df_cpy);
-    free(df_tmp);
-
-  }  // end omp parallel
-  clock_gettime(CLOCK_MONOTONIC, &ts_loop5_stop);
-  printf("loop5 : %14.6e\n", timing(ts_loop5_start, ts_loop5_stop));
-#endif
-
-// loop 6 : Same as loop 5 but the buffer region in DMEM is allocated
-// outside the spatial loop.
-#ifdef __PMEM__
-  clock_gettime(CLOCK_MONOTONIC, &ts_loop6_start);
-  // int32_t NPADD = 4;
-
-  // int32_t vx_start, vx_end;
-  // int32_t vy_start, vy_end;
-  // int32_t vz_start, vz_end;
-
-  vx_start = 0;
-  vx_end = NMESH_VX;
-  vy_start = 0;
-  vy_end = NMESH_VY;
-  vz_start = 0;
-  vz_end = NMESH_VZ;
-
-  // const int32_t NMESH_VX_WP = NMESH_VX + NPADD + NPADD;
-  // double cfl = 0.25;
-#pragma omp parallel
-  {
-    // struct vflux *flux;
-    float *df_tmp, *df_cpy;
-
-    // flux = (struct vflux *)malloc(sizeof(struct vflux) * NMESH_VX_WP);
-    df_cpy = (float *)malloc(sizeof(float) * NMESH_VX_WP);
-    df_tmp = (float *)malloc(sizeof(float) * NMESH_VX_WP);
-
-    float *df_dram = aligned_alloc(
-        ALIGN_SIZE, sizeof(float) * NMESH_VX * NMESH_VY * NMESH_VZ);
-
-    for (int32_t ivx = 0; ivx < NMESH_VX_WP; ivx++) {
-      df_tmp[ivx] = 0.0;  // for measures of nan=0*nan.
-    }
-
-#pragma omp for schedule(auto) collapse(3)
-    for (int32_t ix = 0; ix < NMESH_X; ix++) {
-      for (int32_t iy = 0; iy < NMESH_Y; iy++) {
-        for (int32_t iz = 0; iz < NMESH_Z; iz++) {
-#ifdef __PMEM_MEMCPY__
-          memcpy(df_dram, DF(ix, iy, iz).vel_grid,
-                 sizeof(float) * NMESH_VX * NMESH_VY * NMESH_VZ);
-#elif __PMEM_LOOP__
-          for (int32_t ivy = vy_start; ivy < vy_end; ivy++) {
-            for (int32_t ivz = vz_start; ivz < vz_end; ivz++) {
-              for (int32_t ivx = vx_start; ivx < vx_end; ivx++) {
-                df_dram[(ivz) + NMESH_VZ * ((ivy) + NMESH_VY * (ivx))] =
-                    DF(ix, iy, iz).vel_grid[ivx][ivy][ivz];
-              }
-            }
-          }
-#endif
-          for (int32_t ivy = vy_start; ivy < vy_end; ivy++) {
-            for (int32_t ivz = vz_start; ivz < vz_end; ivz++) {
-              for (int32_t ivx = vx_start; ivx < vx_end; ivx++) {
-                int32_t ivx_wp = ivx + NPADD;
-                df_cpy[ivx_wp] = DRAM_DF_vel(ivx, ivy, ivz);
-              }
-
-              for (int32_t ipadd = 0; ipadd < NPADD; ipadd++) {
-                df_cpy[ipadd] = df_cpy[NPADD];
-                df_cpy[ipadd + NMESH_VX + NPADD] = df_cpy[NMESH_VX + NPADD - 1];
-              }
-              calc_upwind(df_tmp, df_cpy, cfl);
-              // /* Semi-Lagrange scheme */
-              // calc_flux_vel(df_cpy, flux, &ta);
-              // check_positivity_vel(df_check, df_tmp, df_cpy, flux,
-              // &ta);//flux
-
-              // for(int32_t ivx=0;ivx<NMESH_VX;ivx++) {
-              for (int32_t ivx = vx_start; ivx < vx_end; ivx++) {
-                int32_t ivx_wp = ivx + NPADD;
-                DRAM_DF_vel(ivx, ivy, ivz) = df_tmp[ivx_wp];
-                // printf("%f %f\n", DRAM_DF_vel(ivx, ivy, ivz),
-                //        df_cpy[ivx_wp] -
-                //            cfl * (df_cpy[ivx_wp + 1] - df_cpy[ivx_wp -
-                //            1]));
-              }  // ivx
-            }    // ivz
-          }      // ivy
-#ifdef __PMEM_MEMCPY__
-          pmem_memcpy(DF(ix, iy, iz).vel_grid, df_dram,
-                      sizeof(float) * NMESH_VX * NMESH_VY * NMESH_VZ,
-                      PMEM_F_MEM_NONTEMPORAL);
-#elif __PMEM_LOOP__
-          for (int32_t ivy = vy_start; ivy < vy_end; ivy++) {
-            for (int32_t ivz = vz_start; ivz < vz_end; ivz++) {
-              for (int32_t ivx = vx_start; ivx < vx_end; ivx++) {
-                DF(ix, iy, iz).vel_grid[ivx][ivy][ivz] =
-                    df_dram[(ivz) + NMESH_VZ * ((ivy) + NMESH_VY * (ivx))];
-              }
-            }
-          }
-#endif
-        }
-      }
-    }  // ix*iy*iz, end omp for
-
-    free(df_cpy);
-    free(df_tmp);
-    free(df_dram);
-  }  // end omp parallel
-  clock_gettime(CLOCK_MONOTONIC, &ts_loop6_stop);
-  printf("loop6 : %14.6e\n", timing(ts_loop6_start, ts_loop6_stop));
-#endif
+  // loop 6 : Same as loop 5 but the buffer region in DMEM is allocated
+  // outside the spatial loop.
+  float time_loop6 = 0;
+  for (int n = 0; n < NMEASURE; n++) {
+    clock_gettime(CLOCK_MONOTONIC, &ts_loop6_start);
+    integrate_vx_loop6(df, cfl);
+    clock_gettime(CLOCK_MONOTONIC, &ts_loop6_stop);
+    time_loop6 += timing(ts_loop6_start, ts_loop6_stop);
+  }
+  printf("loop6 : %14.6e\n", time_loop6 / (float)NMEASURE);
 
   // loop 7 : Same as loop 6 but direct write back df_tmp to PMEM
-
-#ifdef __PMEM__
-  clock_gettime(CLOCK_MONOTONIC, &ts_loop7_start);
-  // int32_t NPADD = 4;
-
-  // int32_t vx_start, vx_end;
-  // int32_t vy_start, vy_end;
-  // int32_t vz_start, vz_end;
-
-  vx_start = 0;
-  vx_end = NMESH_VX;
-  vy_start = 0;
-  vy_end = NMESH_VY;
-  vz_start = 0;
-  vz_end = NMESH_VZ;
-
-  // const int32_t NMESH_VX_WP = NMESH_VX + NPADD + NPADD;
-  // double cfl = 0.25;
-#pragma omp parallel
-  {
-    // struct vflux *flux;
-    float *df_tmp, *df_cpy;
-
-    // flux = (struct vflux *)malloc(sizeof(struct vflux) * NMESH_VX_WP);
-    df_cpy = (float *)malloc(sizeof(float) * NMESH_VX_WP);
-    df_tmp = (float *)malloc(sizeof(float) * NMESH_VX_WP);
-
-    float *df_dram = aligned_alloc(
-        ALIGN_SIZE, sizeof(float) * NMESH_VX * NMESH_VY * NMESH_VZ);
-
-    for (int32_t ivx = 0; ivx < NMESH_VX_WP; ivx++) {
-      df_tmp[ivx] = 0.0;  // for measures of nan=0*nan.
-    }
-
-#pragma omp for schedule(auto) collapse(3)
-    for (int32_t ix = 0; ix < NMESH_X; ix++) {
-      for (int32_t iy = 0; iy < NMESH_Y; iy++) {
-        for (int32_t iz = 0; iz < NMESH_Z; iz++) {
-#ifdef __PMEM_MEMCPY__
-          memcpy(df_dram, DF(ix, iy, iz).vel_grid,
-                 sizeof(float) * NMESH_VX * NMESH_VY * NMESH_VZ);
-#elif __PMEM_LOOP__
-          for (int32_t ivy = vy_start; ivy < vy_end; ivy++) {
-            for (int32_t ivz = vz_start; ivz < vz_end; ivz++) {
-              for (int32_t ivx = vx_start; ivx < vx_end; ivx++) {
-                df_dram[(ivz) + NMESH_VZ * ((ivy) + NMESH_VY * (ivx))] =
-                    DF(ix, iy, iz).vel_grid[ivx][ivy][ivz];
-              }
-            }
-          }
-#endif
-          for (int32_t ivy = vy_start; ivy < vy_end; ivy++) {
-            for (int32_t ivz = vz_start; ivz < vz_end; ivz++) {
-              for (int32_t ivx = vx_start; ivx < vx_end; ivx++) {
-                int32_t ivx_wp = ivx + NPADD;
-                df_cpy[ivx_wp] = DRAM_DF_vel(ivx, ivy, ivz);
-              }
-
-              for (int32_t ipadd = 0; ipadd < NPADD; ipadd++) {
-                df_cpy[ipadd] = df_cpy[NPADD];
-                df_cpy[ipadd + NMESH_VX + NPADD] = df_cpy[NMESH_VX + NPADD - 1];
-              }
-              calc_upwind(df_tmp, df_cpy, cfl);
-              // /* Semi-Lagrange scheme */
-              // calc_flux_vel(df_cpy, flux, &ta);
-              // check_positivity_vel(df_check, df_tmp, df_cpy, flux,
-              // &ta);//flux
-
-              // for(int32_t ivx=0;ivx<NMESH_VX;ivx++) {
-#ifdef __PMEM_MEMCPY__
-              pmem_memcpy(DF(ix, iy, iz).vel_grid, df_tmp + NPADD,
-                          sizeof(float) * NMESH_VX, PMEM_F_MEM_NONTEMPORAL);
-#elif __PMEM_LOOP__
-              for (int32_t ivx = vx_start; ivx < vx_end; ivx++) {
-                int32_t ivx_wp = ivx + NPADD;
-                DF(ix, iy, iz).vel_grid[ivx][ivy][ivz] = df_tmp[ivx_wp];
-                // printf("%f %f\n", DRAM_DF_vel(ivx, ivy, ivz),
-                //        df_cpy[ivx_wp] -
-                //            cfl * (df_cpy[ivx_wp + 1] - df_cpy[ivx_wp -
-                //            1]));
-              }  // ivx
-#endif
-            }  // ivz
-          }    // ivy
-        }
-      }
-    }  // ix*iy*iz, end omp for
-
-    free(df_cpy);
-    free(df_tmp);
-    free(df_dram);
-  }  // end omp parallel
-  clock_gettime(CLOCK_MONOTONIC, &ts_loop7_stop);
-  printf("loop7 : %14.6e\n", timing(ts_loop7_start, ts_loop7_stop));
-#endif
+  float time_loop7 = 0;
+  for (int n = 0; n < NMEASURE; n++) {
+    clock_gettime(CLOCK_MONOTONIC, &ts_loop7_start);
+    integrate_vx_loop7(df, cfl);
+    clock_gettime(CLOCK_MONOTONIC, &ts_loop7_stop);
+    time_loop7 += timing(ts_loop7_start, ts_loop7_stop);
+  }
+  printf("loop7 : %14.6e\n", time_loop7 / (float)NMEASURE);
 
 #ifdef __PMEM__
   pmem_unmap(df, mapped_len);
