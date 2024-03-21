@@ -507,7 +507,7 @@ void integrate_vx_loop7(struct pos_grid *df, double cfl) {
 }
 
 void integrate_vx_loop8(struct pos_grid *df, double cfl) {
-  // loop 8 : Same as loop 6 but when write back df_tmp to PMEM,without
+  // loop 8 : Same as loop 7 but when write back df_tmp to PMEM,without
   // pmem_memcpy
 #ifdef __PMEM__
   int32_t NPADD = 4;
